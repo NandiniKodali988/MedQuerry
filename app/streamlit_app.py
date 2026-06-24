@@ -32,6 +32,29 @@ st.set_page_config(
 st.title("💊 MedQuerry")
 st.caption("Medicare Part D Drug Spending Analytics · CMS Data 2019–2023")
 
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+THEMES = {
+    "Default":          "default",
+    "Dark":             "dark",
+    "FiveThirtyEight":  "fivethirtyeight",
+    "ggplot2":          "ggplot2",
+    "Google Charts":    "googlecharts",
+    "Quartz":           "quartz",
+    "Vox":              "vox",
+    "Urban Institute":  "urbaninstitute",
+}
+
+with st.sidebar:
+    st.header("Settings")
+    chosen_theme = st.selectbox(
+        "Chart theme",
+        options=list(THEMES.keys()),
+        index=0,
+    )
+
+active_theme = THEMES[chosen_theme]
+
 # ── Session state ─────────────────────────────────────────────────────────────
 # Streamlit reruns the whole script on every interaction.
 # st.session_state is a dict that persists across those reruns.
@@ -75,31 +98,94 @@ def extract_chart_rows(tool_name: str, result: dict) -> list[dict] | None:
     return None
 
 
+# ── Theme application ─────────────────────────────────────────────────────────
+# In Altair 5.5+, alt.themes.enable() only sets usermeta.embedOptions.theme,
+# which Streamlit does not forward to Vega-Embed. Instead we apply config
+# directly via .configure_*() so it is baked into the Vega-Lite spec.
+# We also pass theme=None to st.altair_chart to stop Streamlit's own
+# theme override from clobbering our config.
+
+_THEME_CONFIGS = {
+    "default": dict(),
+    "dark": dict(
+        background="#333333",
+        axis=alt.AxisConfig(labelColor="#ffffff", titleColor="#ffffff",
+                            gridColor="#555555", domainColor="#888888", tickColor="#888888"),
+        legend=alt.LegendConfig(labelColor="#ffffff", titleColor="#ffffff"),
+        title=alt.TitleConfig(color="#ffffff"),
+        view=alt.ViewConfig(fill="#333333", stroke="#555555"),
+        mark=alt.MarkConfig(color="#4c9be8"),
+    ),
+    "fivethirtyeight": dict(
+        background="#F0F0F0",
+        axis=alt.AxisConfig(labelColor="#5C5C5C", titleColor="#5C5C5C",
+                            gridColor="#CBCBCB", domainColor="#CBCBCB"),
+        view=alt.ViewConfig(fill="#F0F0F0"),
+        mark=alt.MarkConfig(color="#30a2da"),
+    ),
+    "ggplot2": dict(
+        background="#E5E5E5",
+        axis=alt.AxisConfig(labelColor="#555555", titleColor="#555555",
+                            gridColor="#FFFFFF", domainColor="#555555"),
+        view=alt.ViewConfig(fill="#E5E5E5", stroke="transparent"),
+        mark=alt.MarkConfig(color="#F8766D"),
+    ),
+    "googlecharts": dict(
+        background="#ffffff",
+        axis=alt.AxisConfig(labelColor="#757575", titleColor="#757575",
+                            gridColor="#E0E0E0", domainColor="#BDBDBD"),
+        view=alt.ViewConfig(fill="#ffffff"),
+        mark=alt.MarkConfig(color="#3366CC"),
+    ),
+    "quartz": dict(
+        background="#ffffff",
+        axis=alt.AxisConfig(labelColor="#525252", titleColor="#525252",
+                            gridColor="#E8E8E8", domainColor="#C8C8C8"),
+        view=alt.ViewConfig(fill="#ffffff"),
+        mark=alt.MarkConfig(color="#ab5787"),
+    ),
+    "vox": dict(
+        background="#ffffff",
+        axis=alt.AxisConfig(labelColor="#666666", titleColor="#333333",
+                            gridColor="#E5E5E5", domainColor="#AAAAAA"),
+        view=alt.ViewConfig(fill="#ffffff"),
+        mark=alt.MarkConfig(color="#4889AB"),
+    ),
+    "urbaninstitute": dict(
+        background="#ffffff",
+        axis=alt.AxisConfig(labelColor="#1696d2", titleColor="#1696d2",
+                            gridColor="#DEDDDD", domainColor="#DEDDDD"),
+        view=alt.ViewConfig(fill="#ffffff"),
+        mark=alt.MarkConfig(color="#1696d2"),
+    ),
+}
+
+def _themed(chart, theme: str):
+    cfg = _THEME_CONFIGS.get(theme, {})
+    if not cfg:
+        return chart
+    return chart.configure(**cfg)
+
+
 # ── Chart rendering ───────────────────────────────────────────────────────────
 # Two chart types:
 #   - "year" column present → line chart (trend over time)
 #   - Otherwise            → horizontal bar chart (ranking / comparison)
-#
-# Key fix vs original: we explicitly coerce columns to numeric with
-# pd.to_numeric(errors="ignore") before calling select_dtypes. Without this,
-# columns that have a single None mixed with floats stay as object dtype and
-# get missed by select_dtypes(include="number").
 
-def try_render_chart(data: dict) -> bool:
+def try_render_chart(data: dict, theme: str = "default") -> bool:
     try:
         rows = data.get("rows")
         if not rows or len(rows) < 2:
             return False
 
         df = pd.DataFrame(rows)
-
         numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
         if not numeric_cols:
             return False
 
-        # ── Line chart: year on x-axis, first non-year numeric on y ──────────
+        # ── Line chart ────────────────────────────────────────────────────────
         if "year" in df.columns:
             value_cols = [c for c in numeric_cols if c != "year"]
             if not value_cols:
@@ -119,10 +205,10 @@ def try_render_chart(data: dict) -> bool:
                 alt.Chart(df).mark_line(point=True).encode(**encode)
                 .properties(height=350).interactive()
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(_themed(chart, theme), use_container_width=True, theme=None)
             return True
 
-        # ── Bar chart: first text col on y, first numeric on x ───────────────
+        # ── Bar chart ─────────────────────────────────────────────────────────
         if not text_cols:
             return False
         x_col = text_cols[0]
@@ -139,7 +225,7 @@ def try_render_chart(data: dict) -> bool:
             .properties(height=max(200, len(df) * 28))
             .interactive()
         )
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(_themed(chart, theme), use_container_width=True, theme=None)
         return True
 
     except Exception:
@@ -215,7 +301,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("chart_data"):
-            try_render_chart(msg["chart_data"])
+            try_render_chart(msg["chart_data"], theme=active_theme)
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 # st.chat_input() pins an input box to the bottom of the page.
@@ -233,7 +319,7 @@ if prompt := st.chat_input("Ask about Medicare Part D drug spending..."):
         answer, chart_data = ask_streamlit(prompt)
         st.markdown(answer)
         if chart_data:
-            try_render_chart(chart_data)
+            try_render_chart(chart_data, theme=active_theme)
 
     # Persist the assistant message (with chart data) so it survives reruns
     st.session_state.messages.append({
