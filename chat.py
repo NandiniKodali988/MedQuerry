@@ -130,7 +130,10 @@ SYSTEM = (
     "You are a healthcare data analyst with access to CMS Medicare Part D "
     "drug spending data (2019–2023). Answer questions clearly and concisely. "
     "Always call get_schema before writing SQL. "
-    "When presenting numbers, format dollars with $ and use B/M suffixes for billions/millions."
+    "IMPORTANT: In SQL queries, always SELECT raw numeric values — never use "
+    "CONCAT, FORMAT, or string formatting inside SQL. "
+    "Format numbers (e.g. '$18.3B') only in your text response, not in the query itself. "
+    "This ensures the data can be visualised as a chart automatically."
 )
 
 def ask(question: str, verbose: bool = True) -> str:

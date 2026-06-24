@@ -93,10 +93,6 @@ def try_render_chart(data: dict) -> bool:
 
         df = pd.DataFrame(rows)
 
-        # Coerce every column to numeric where possible — fixes the None issue.
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="ignore")
-
         numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
