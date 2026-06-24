@@ -43,64 +43,111 @@ st.caption("Medicare Part D Drug Spending Analytics · CMS Data 2019–2023")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# ── Chart data extraction ─────────────────────────────────────────────────────
+# Each tool returns a different structure. This normalises them all to a flat
+# list of row-dicts that try_render_chart can work with.
+
+def extract_chart_rows(tool_name: str, result: dict) -> list[dict] | None:
+    if tool_name == "run_sql":
+        return result.get("rows")
+
+    if tool_name in ("find_cost_outliers",):
+        return result.get("rows")
+
+    if tool_name == "summarize_trends":
+        # result has a "trend" key: [{year, total_spend_millions, ...}, ...]
+        # Add the drug name as a column so the chart has a label.
+        rows = result.get("trend")
+        if rows and result.get("drug"):
+            return [{**r, "drug": result["drug"]} for r in rows]
+        return rows
+
+    if tool_name == "compare_drugs":
+        # result is {drug_a: {drug, trend: [...]}, drug_b: {...}}
+        # Flatten both trends into one list with a "drug" column for color.
+        rows = []
+        for entry in result.values():
+            if isinstance(entry, dict) and "trend" in entry:
+                for r in entry["trend"]:
+                    rows.append({**r, "drug": entry.get("drug", "")})
+        return rows or None
+
+    return None
+
+
 # ── Chart rendering ───────────────────────────────────────────────────────────
-# After Claude calls run_sql, we capture the result and try to render it.
-# Logic:
-#   - If there's a column named "year" with integers → line chart (trend)
-#   - Otherwise → horizontal bar chart (ranking/comparison)
+# Two chart types:
+#   - "year" column present → line chart (trend over time)
+#   - Otherwise            → horizontal bar chart (ranking / comparison)
+#
+# Key fix vs original: we explicitly coerce columns to numeric with
+# pd.to_numeric(errors="ignore") before calling select_dtypes. Without this,
+# columns that have a single None mixed with floats stay as object dtype and
+# get missed by select_dtypes(include="number").
 
 def try_render_chart(data: dict) -> bool:
-    """
-    Tries to render an Altair chart from a run_sql result dict.
-    Returns True if a chart was rendered, False if the data wasn't chart-able.
-    """
-    rows = data.get("rows")
-    if not rows or len(rows) < 2:
-        return False
+    try:
+        rows = data.get("rows")
+        if not rows or len(rows) < 2:
+            return False
 
-    df = pd.DataFrame(rows)
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    text_cols = df.select_dtypes(exclude="number").columns.tolist()
+        df = pd.DataFrame(rows)
 
-    if not numeric_cols or not text_cols:
-        return False
+        # Coerce every column to numeric where possible — fixes the None issue.
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="ignore")
 
-    y_col = numeric_cols[0]
-    x_col = text_cols[0]
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        text_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
 
-    # Line chart for time-series data (year column present)
-    if "year" in df.columns and pd.api.types.is_integer_dtype(df["year"]):
-        label_col = text_cols[0] if text_cols else None
-        chart = (
-            alt.Chart(df)
-            .mark_line(point=True)
-            .encode(
+        if not numeric_cols:
+            return False
+
+        # ── Line chart: year on x-axis, first non-year numeric on y ──────────
+        if "year" in df.columns:
+            value_cols = [c for c in numeric_cols if c != "year"]
+            if not value_cols:
+                return False
+            y_col = value_cols[0]
+            color_col = next((c for c in text_cols if c not in ("drug",)), None) or (
+                "drug" if "drug" in text_cols else None
+            )
+            encode = dict(
                 x=alt.X("year:O", title="Year"),
                 y=alt.Y(f"{y_col}:Q", title=y_col.replace("_", " ")),
-                color=alt.Color(f"{label_col}:N", title=label_col) if label_col else alt.value("steelblue"),
-                tooltip=list(df.columns),
+                tooltip=[c for c in df.columns if c in numeric_cols + text_cols],
             )
-            .properties(height=350)
+            if color_col:
+                encode["color"] = alt.Color(f"{color_col}:N", title=color_col)
+            chart = (
+                alt.Chart(df).mark_line(point=True).encode(**encode)
+                .properties(height=350).interactive()
+            )
+            st.altair_chart(chart, use_container_width=True)
+            return True
+
+        # ── Bar chart: first text col on y, first numeric on x ───────────────
+        if not text_cols:
+            return False
+        x_col = text_cols[0]
+        y_col = numeric_cols[0]
+        chart = (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(
+                x=alt.X(f"{y_col}:Q", title=y_col.replace("_", " ")),
+                y=alt.Y(f"{x_col}:N", sort="-x", title=x_col.replace("_", " ")),
+                tooltip=list(df.columns),
+                color=alt.Color(f"{y_col}:Q", scale=alt.Scale(scheme="blues"), legend=None),
+            )
+            .properties(height=max(200, len(df) * 28))
             .interactive()
         )
         st.altair_chart(chart, use_container_width=True)
         return True
 
-    # Bar chart for rankings / comparisons
-    chart = (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            x=alt.X(f"{y_col}:Q", title=y_col.replace("_", " ")),
-            y=alt.Y(f"{x_col}:N", sort="-x", title=x_col.replace("_", " ")),
-            tooltip=list(df.columns),
-            color=alt.Color(f"{y_col}:Q", scale=alt.Scale(scheme="blues"), legend=None),
-        )
-        .properties(height=max(200, len(df) * 28))
-        .interactive()
-    )
-    st.altair_chart(chart, use_container_width=True)
-    return True
+    except Exception:
+        return False
 
 
 # ── Ask loop ──────────────────────────────────────────────────────────────────
@@ -108,17 +155,18 @@ def try_render_chart(data: dict) -> bool:
 #   - st.status() shows a live indicator of which tools are being called
 #   - We capture the last run_sql result so we can render a chart after
 
+CHARTABLE_TOOLS = {"run_sql", "find_cost_outliers", "summarize_trends", "compare_drugs"}
+
+
 def ask_streamlit(question: str) -> tuple[str, dict | None]:
     """
     Runs the Claude tool-use loop and returns (answer_text, chart_data).
-    chart_data is the result of the last run_sql call, or None.
+    chart_data is {"rows": [...]} from the last chartable tool call, or None.
     """
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     messages = [{"role": "user", "content": question}]
-    last_sql_result = None
+    last_chart_data = None
 
-    # st.status() creates a collapsible "thinking" block in the UI.
-    # Updates to it are visible in real-time as the loop runs.
     with st.status("Thinking...", expanded=True) as status:
         while True:
             response = client.messages.create(
@@ -134,7 +182,7 @@ def ask_streamlit(question: str) -> tuple[str, dict | None]:
             if response.stop_reason == "end_turn":
                 status.update(label="Done", state="complete", expanded=False)
                 final = next(b.text for b in response.content if hasattr(b, "text"))
-                return final, last_sql_result
+                return final, last_chart_data
 
             if response.stop_reason == "tool_use":
                 tool_results = []
@@ -142,15 +190,17 @@ def ask_streamlit(question: str) -> tuple[str, dict | None]:
                     if block.type != "tool_use":
                         continue
 
-                    # Show the tool call in the status widget
                     args_preview = json.dumps(block.input)[:80]
                     status.write(f"`{block.name}({args_preview})`")
 
                     result_str = dispatch(block.name, block.input)
 
-                    # Capture run_sql results for chart rendering
-                    if block.name == "run_sql":
-                        last_sql_result = json.loads(result_str)
+                    # Normalise any chartable tool result to {"rows": [...]}
+                    if block.name in CHARTABLE_TOOLS:
+                        result_dict = json.loads(result_str)
+                        rows = extract_chart_rows(block.name, result_dict)
+                        if rows:
+                            last_chart_data = {"rows": rows}
 
                     tool_results.append({
                         "type": "tool_result",
