@@ -2,8 +2,8 @@
 
 Ask questions about Medicare drug spending in plain English. Get answers, charts, and a dashboard — automatically.
 
-![MedQuerry demo](images/dashboard-sample.png)
-
+![MedQuerry demo](images/dashboard.png)
+![MedQuerry Dashboard](images/dashboard.png)
 ---
 
 ## What it does
